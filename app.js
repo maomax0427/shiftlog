@@ -3,7 +3,7 @@
   const $ = s => document.querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const { pad, ymd, toDate, hm2m, m2hm, dim, yen, man, hours, hShort } = C;
-  const K = { api: 'shiftlog:api', mode: 'shiftlog:mode', tab: 'shiftlog:tab', hol: 'shiftlog:hol', dirty: 'shiftlog:dirty' };
+  const K = { api: 'shiftlog:api', mode: 'shiftlog:mode', tab: 'shiftlog:tab', hol: 'shiftlog:hol', dirty: 'shiftlog:dirty', rows: 'shiftlog:rows' };
   const dataKey = () => 'shiftlog:data:' + S.mode;
   const store = {
     get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -25,7 +25,7 @@
     year: now0.getFullYear(),
     payMonth: now0.getMonth(),
     data: null, hol: {}, syncing: false, lastSync: null, dirty: store.get(K.dirty, false),
-    stamp: null, form: null, wpForm: null, cals: null,
+    stamp: null, form: null, wpForm: null, cals: null, rev: 0, oldScript: false, tplEdit: false,
   };
   if (S.api) S.mode = 'api';
 
@@ -88,8 +88,9 @@
       x.state = x.endMs > nowMs ? 'plan' : x.payDate <= today ? 'recv' : 'earned';
       (byDate[x.date] = byDate[x.date] || []).push(x);
     });
-    D = { all, byDate, on: all.filter(x => !x.off), tpl: C.templates(all.filter(x => !x.off && x.date <= today || x.src === 'manual')) };
-    if (D.tpl.length < 3) D.tpl = C.templates(all.filter(x => !x.off));
+    const hid = cfg().hiddenTpl || [];
+    D = { all, byDate, on: all.filter(x => !x.off), tpl: C.templates(all.filter(x => !x.off && x.date <= today || x.src === 'manual'), 8, hid) };
+    if (D.tpl.length < 3) D.tpl = C.templates(all.filter(x => !x.off), 8, hid);
     return D;
   }
   function sumOf(list) {
@@ -124,6 +125,7 @@
   let pushT = null;
   function persist() {
     D = null;
+    S.rev++;
     saveLocal();
     if (S.mode !== 'api') return;
     S.dirty = true; store.set(K.dirty, true);
@@ -131,9 +133,13 @@
     pushT = setTimeout(push, 700);
   }
   async function push() {
+    const rev0 = S.rev;
     try {
-      await api('save', { config: S.data.config, shifts: S.data.shifts, rows: listRows() });
-      S.dirty = false; store.set(K.dirty, false);
+      const rows = listRows();
+      await api('save', { config: S.data.config, shifts: S.data.shifts, rows });
+      store.set(K.rows, JSON.stringify(rows));
+      // 送っている間にまた変更があれば、まだ未送信のまま（次の push で送る）
+      if (S.rev === rev0) { S.dirty = false; store.set(K.dirty, false); }
     } catch (e) { toast('保存に失敗しました（この端末には保存済み。次の同期で再送します）'); }
   }
   async function sync(quiet) {
@@ -141,15 +147,20 @@
     S.syncing = true; render();
     try {
       if (S.dirty) await push();
+      const rev0 = S.rev;
       const j = await api('load', Object.assign({ keywords: keywords(), calendarIds: cfg().calendarIds }, range()));
-      if (j.config && !S.dirty) S.data.config = Object.assign({}, DEF_CFG, j.config);
-      if (!S.dirty) S.data.shifts = j.shifts || [];
+      // 読み込み中にこの端末で変更があったら、古いサーバーの内容で上書きしない（消した勤務先が戻る不具合の対策）
+      const fresh = S.rev === rev0 && !S.dirty;
+      if (j.config && fresh) S.data.config = Object.assign({}, DEF_CFG, j.config);
+      if (fresh) S.data.shifts = j.shifts || [];
       S.data.events = j.events || [];
+      S.oldScript = !(j.version >= 2);
       S.lastSync = Date.now();
       D = null; saveLocal();
       if (!quiet) toast('カレンダーから ' + derive().all.filter(x => x.src === 'gcal').length + ' 件のシフトを読み込みました');
-      // 一覧シートを最新の計算で更新（初回や時給変更のあとも分析用シートがずれないように）
-      api('save', { rows: listRows() }).catch(() => { });
+      // 一覧シートを最新の計算で更新（中身が変わったときだけ）
+      const rows = listRows(), sig = JSON.stringify(rows);
+      if (sig !== store.get(K.rows, '') && !S.dirty) api('save', { rows }).then(() => store.set(K.rows, sig)).catch(() => { });
     } catch (e) {
       toast('同期できませんでした: ' + e.message);
     }
@@ -204,6 +215,7 @@
       + (S.mode === 'api' ? '<button class="icon-btn' + (S.syncing ? ' spin' : '') + '" data-act="sync" aria-label="カレンダーと同期">' + ICON.sync + '</button>' : '')
       + '</div>';
     if (S.mode === 'demo') h += '<div class="banner">お試しデータを表示中<button class="btn sm gray" data-act="gotoSet">はじめる</button></div>';
+    if (S.oldScript) h += '<div class="banner">Apps Script を更新すると同期が速くなります<button class="btn sm gray" data-act="gotoSet">手順</button></div>';
     if (!wps().length) h += '<div class="banner">まず「勤務先」で時給とカレンダーのキーワードを登録してください<button class="btn sm gray" data-act="newWp">登録</button></div>';
 
     // 今月のサマリー
@@ -271,14 +283,16 @@
   /* ---------------- まとめて入力（スタンプ） ---------------- */
   function stampBar() {
     const tpl = S.stamp.list;
-    let h = '<div class="stamp-bar"><div class="stamp-h"><b>まとめて入力</b><span class="muted small">シフトを選んで日付をタップ（もう一度で取り消し）</span><button class="btn sm primary" data-act="stampDone">完了</button></div><div class="chips">';
+    let h = '<div class="stamp-bar"><div class="stamp-h"><b>まとめて入力</b><span class="muted small">シフトを選んで日付をタップ（もう一度で取り消し）</span><button class="btn sm gray" data-act="tplEdit">' + (S.tplEdit ? '完了' : '整理') + '</button><button class="btn sm primary" data-act="stampDone">完了</button></div><div class="chips">';
     if (!tpl.length) h += '<span class="muted small">まだ履歴がありません。先に1件入力してください</span>';
     tpl.forEach((t, i) => { const w = wpById(t.wpId); h += tplChip(t, w, 'stampTpl', i, S.stamp.i === i); });
     return h + '</div></div>';
   }
   function tplChip(t, w, act, i, on) {
+    if (S.tplEdit) return '<button class="tpl del" data-act="hideTpl" data-k="' + esc(t.k) + '" style="--c:' + w.color + '"><i></i><b>' + esc(w.name) + '</b><span class="num">' + tShort(t.s, t.e) + '</span><em>×</em></button>';
     return '<button class="tpl' + (on ? ' on' : '') + '" data-act="' + act + '" data-i="' + i + '" style="--c:' + w.color + '"><i></i><b>' + esc(w.name) + '</b><span class="num">' + tShort(t.s, t.e) + '</span></button>';
   }
+  const tplHead = () => '<div class="lbl-s tpl-h"><span>よく使うシフト</span><button data-act="tplEdit">' + (S.tplEdit ? '完了' : '整理') + '</button></div>';
   function stampDay(ds) {
     const t = S.stamp.list[S.stamp.i];
     if (!t) { toast('上のシフトを選んでください'); return; }
@@ -309,7 +323,7 @@
     let h = '';
     if (!g) {
       const tpl = derive().tpl;
-      if (tpl.length) h += '<div class="lbl-s">よく使うシフト</div><div class="chips tpls">' + tpl.map((t, i) => tplChip(t, wpById(t.wpId), 'useTpl', i, f.wpId === t.wpId && hm2m(f.start) === t.s && (hm2m(f.end) <= hm2m(f.start) ? hm2m(f.end) + 1440 : hm2m(f.end)) === t.e)).join('') + '</div>';
+      if (tpl.length || (cfg().hiddenTpl || []).length) h += tplHead() + '<div class="chips tpls">' + tpl.map((t, i) => tplChip(t, wpById(t.wpId), 'useTpl', i, f.wpId === t.wpId && hm2m(f.start) === t.s && (hm2m(f.end) <= hm2m(f.start) ? hm2m(f.end) + 1440 : hm2m(f.end)) === t.e)).join('') + (S.tplEdit && (cfg().hiddenTpl || []).length ? '<button class="tpl" data-act="showTpl"><span>消したものを戻す</span></button>' : '') + '</div>';
     } else {
       h += '<div class="note">Googleカレンダーの予定「<b>' + esc(f.title) + '</b>」から読み込んでいます（' + esc(f.cal || '') + '）。日時を変えるときはカレンダーのほうを直してください。</div>';
     }
@@ -523,6 +537,10 @@
     if (S.mode === 'api') {
       h += '<div class="set-row"><div class="l"><span class="status-dot on"></span>つながっています<small>' + (S.lastSync ? '最終同期 ' + new Date(S.lastSync).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'まだ同期していません') + '</small></div><button class="btn sm soft" data-act="sync">今すぐ同期</button></div>'
         + '<div class="set-row"><div class="l">読み込むカレンダー<small>' + (c.calendarIds && c.calendarIds.length ? c.calendarIds.length + '個を選択中' : 'メインのカレンダー') + '</small></div><button class="btn sm gray" data-act="pickCal">選ぶ</button></div>'
+        + (S.oldScript ? '<div class="guide upd"><b>⚡ 同期を速くする（Apps Script の更新）</b><ol>'
+          + '<li>スプレッドシートの 拡張機能 → Apps Script を開き、中身を消して最新の <a class="link" href="https://github.com/maomax0427/shiftlog/blob/main/apps-script/Code.gs" target="_blank" rel="noopener">Code.gs</a> を貼り付けて保存</li>'
+          + '<li>関数 <code>setup</code> を ▶実行 → 権限を「許可」（外部サービスへの接続が増えます）</li>'
+          + '<li>デプロイ → デプロイを管理 → ✏️ → バージョン「新バージョン」→ デプロイ（URL は変わりません）</li></ol></div>' : '')
         + '<div class="set-row"><div class="l">連携を解除<small>この端末のURLだけ消します</small></div><button class="btn sm danger" data-act="unlink">解除</button></div>';
     } else {
       h += '<div class="guide"><b>つなぎ方</b>（最初の1回だけ・5分ほど）<ol>'
@@ -598,7 +616,7 @@
   }
   function closeSheet() {
     $('#sheet').hidden = true; $('#sheetBack').hidden = true; document.body.style.overflow = '';
-    S.form = null; S.wpForm = null;
+    S.form = null; S.wpForm = null; S.tplEdit = false;
   }
   const rerenderSheet = html => { const b = $('#sheet .sh-b'); const t = b.scrollTop; b.innerHTML = html; b.scrollTop = t; };
 
@@ -627,7 +645,16 @@
       case 'edit': openShift(b.dataset.id); break;
       case 'stamp': if (!wps().length) { toast('先に勤務先を登録してください'); break; } S.stamp = { i: 0, list: derive().tpl.slice() }; render(); break;
       case 'stampTpl': S.stamp.i = Number(b.dataset.i); render(); break;
-      case 'stampDone': S.stamp = null; render(); break;
+      case 'stampDone': S.stamp = null; S.tplEdit = false; render(); break;
+      case 'tplEdit': S.tplEdit = !S.tplEdit; if (S.form) rerenderSheet(shiftForm()); else render(); break;
+      case 'hideTpl': {
+        const hid = cfg().hiddenTpl = (cfg().hiddenTpl || []).concat([b.dataset.k]);
+        persist();
+        if (S.stamp) { S.stamp.list = S.stamp.list.filter(t => hid.indexOf(t.k) < 0); S.stamp.i = 0; }
+        if (S.form) rerenderSheet(shiftForm()); else render();
+        break;
+      }
+      case 'showTpl': cfg().hiddenTpl = []; persist(); if (S.form) rerenderSheet(shiftForm()); else render(); break;
       case 'useTpl': { const t = derive().tpl[Number(b.dataset.i)]; Object.assign(S.form, { wpId: t.wpId, start: m2hm(t.s), end: m2hm(t.e), brk: t.brk == null ? '' : String(t.brk) }); rerenderSheet(shiftForm()); break; }
       case 'fWp': S.form.wpId = b.dataset.id; rerenderSheet(shiftForm()); break;
       case 'saveShift': saveShift(b); break;

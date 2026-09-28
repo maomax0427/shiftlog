@@ -79,12 +79,14 @@ window.C = (function () {
   }
 
   // よく使うシフト（テンプレート）: 勤務先・開始・終了・休憩の組み合わせを回数順に
-  function templates(shifts, limit) {
-    const map = {};
+  function templates(shifts, limit, hidden) {
+    const map = {}, hide = {};
+    (hidden || []).forEach(k => { hide[k] = 1; });
     shifts.forEach(s => {
       if (!s.wpId) return;
       const k = s.wpId + '|' + s.s + '|' + s.e + '|' + (s.brk == null ? '' : s.brk);
-      const t = map[k] || (map[k] = { wpId: s.wpId, s: s.s, e: s.e, brk: s.brk == null ? null : s.brk, n: 0, last: '' });
+      if (hide[k]) return;
+      const t = map[k] || (map[k] = { k, wpId: s.wpId, s: s.s, e: s.e, brk: s.brk == null ? null : s.brk, n: 0, last: '' });
       t.n++; if (s.date > t.last) t.last = s.date;
     });
     return Object.values(map).sort((a, b) => b.n - a.n || (a.last < b.last ? 1 : -1)).slice(0, limit || 8);

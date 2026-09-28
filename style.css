@@ -311,3 +311,8 @@ input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--accent); f
 .welcome .btn + .btn { margin-top: 8px; }
 .big-w { margin-top: 12vh; }
 .f-row.col .in { flex: none; height: 40px; }
+.tpl-h { display: flex; justify-content: space-between; align-items: center; }
+.tpl-h button { color: var(--accent); font-weight: 700; font-size: 13px; padding: 2px 4px; }
+.tpl.del { background: var(--card); box-shadow: inset 0 0 0 1.5px var(--red); }
+.tpl.del em { font-style: normal; color: var(--red); font-weight: 800; margin-left: 2px; }
+.guide.upd { background: var(--gold-soft); border-bottom: 1px solid var(--line); }

@@ -7,6 +7,9 @@
  *        次のユーザーとして実行：自分 / アクセスできるユーザー：全員
  *   発行された URL をアプリの 設定 → 連携 に貼ります（他人に教えないこと）。
  *
+ * 更新するとき: コードを貼り替えて保存 → setup を実行（権限を承認）→
+ *   デプロイ → デプロイを管理 → 鉛筆 → バージョン「新バージョン」→ デプロイ（URL はそのまま）
+ *
  * シート
  *   shifts … 手入力したシフト（1シフト1行）
  *   一覧   … カレンダー分も含めた全シフトと給料（アプリが計算して書き込む。分析用）
@@ -48,12 +51,13 @@ function setup() {
   const first = ss_().getSheetByName('シート1') || ss_().getSheetByName('Sheet1');
   if (first && first.getLastRow() === 0 && ss_().getSheets().length > 1) ss_().deleteSheet(first);
   CalendarApp.getDefaultCalendar();   // カレンダーの権限を承認させる
+  UrlFetchApp.fetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1', { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });   // 高速読み込み用の権限
 }
 
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
-function doGet() { return json_({ ok: true, app: 'shiftlog', version: 1 }); }
+function doGet() { return json_({ ok: true, app: 'shiftlog', version: 2 }); }
 
 function doPost(e) {
   try {
@@ -95,7 +99,7 @@ function load_(req) {
   const from = new Date(req.from || Date.now() - 400 * 864e5);
   const to = new Date(req.to || Date.now() + 400 * 864e5);
   const calIds = (req.calendarIds || (config && config.calendarIds) || []);
-  return { ok: true, config: config, shifts: readShifts_(), events: events_(calIds, keywords, from, to), at: Date.now() };
+  return { ok: true, version: 2, config: config, shifts: readShifts_(), events: events_(calIds, keywords, from, to), at: Date.now() };
 }
 function keywordsOf_(config) {
   const out = [];
@@ -108,11 +112,48 @@ function cals_(ids) {
 }
 function events_(calIds, keywords, from, to) {
   if (!keywords.length) return [];
+  try { return eventsFast_(calIds, keywords, from, to); }
+  catch (err) { return eventsSlow_(calIds, keywords, from, to); }
+}
+// Calendar API を直接呼ぶ（カレンダーごとに並列・必要な項目だけ・1回で2500件）ので速い
+function eventsFast_(calIds, keywords, from, to) {
+  const ids = calIds && calIds.length ? calIds : ['primary'];
+  const token = ScriptApp.getOAuthToken();
+  const fields = 'items(iCalUID,summary,start,end,status,attendees(self,responseStatus)),nextPageToken,summary';
+  const reqs = ids.map(id => ({ id }));
+  const url = (r, page) => 'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(r.id) + '/events?singleEvents=true&maxResults=2500'
+    + '&timeMin=' + encodeURIComponent(from.toISOString()) + '&timeMax=' + encodeURIComponent(to.toISOString())
+    + '&fields=' + encodeURIComponent(fields) + (page ? '&pageToken=' + encodeURIComponent(page) : '');
+  const out = {};
+  let todo = reqs.map(r => ({ r, page: null }));
+  for (let round = 0; todo.length && round < 5; round++) {
+    const res = UrlFetchApp.fetchAll(todo.map(t => ({ url: url(t.r, t.page), headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true })));
+    const next = [];
+    res.forEach((rs, i) => {
+      if (rs.getResponseCode() !== 200) throw new Error('calendar api ' + rs.getResponseCode());
+      const j = JSON.parse(rs.getContentText());
+      (j.items || []).forEach(ev => {
+        if (ev.status === 'cancelled' || !ev.start || !ev.start.dateTime) return;   // 終日の予定は除く
+        if ((ev.attendees || []).some(a => a.self && a.responseStatus === 'declined')) return;
+        const title = ev.summary || '';
+        const low = title.toLowerCase();
+        if (!keywords.some(k => low.indexOf(k) >= 0)) return;
+        const st = Date.parse(ev.start.dateTime);
+        const id = ev.iCalUID + '@' + st;
+        out[id] = { id, t: title, s: st, e: Date.parse(ev.end.dateTime), cal: j.summary || '' };
+      });
+      if (j.nextPageToken) next.push({ r: todo[i].r, page: j.nextPageToken });
+    });
+    todo = next;
+  }
+  return Object.keys(out).map(k => out[k]);
+}
+// 予備：CalendarApp で1件ずつ（遅い）
+function eventsSlow_(calIds, keywords, from, to) {
   const out = [];
   cals_(calIds).forEach(cal => {
     cal.getEvents(from, to).forEach(ev => {
       if (ev.isAllDayEvent()) return;
-      try { if (ev.getMyStatus() === CalendarApp.GuestStatus.NO) return; } catch (e) { }
       const title = ev.getTitle() || '';
       const low = title.toLowerCase();
       if (!keywords.some(k => low.indexOf(k) >= 0)) return;
