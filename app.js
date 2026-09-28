@@ -24,6 +24,7 @@
     sel: ymd(now0),
     year: now0.getFullYear(),
     payMonth: now0.getMonth(),
+    pMonth: new Date(now0.getFullYear(), now0.getMonth(), 1), payView: store.get('shiftlog:pview', 'm'), ringKey: '',
     data: null, hol: {}, syncing: false, lastSync: null, dirty: store.get(K.dirty, false),
     stamp: null, form: null, wpForm: null, cals: null, rev: 0, oldScript: false, ver: store.get('shiftlog:ver', 0), tplEdit: false,
   };
@@ -81,6 +82,7 @@
       x.wp = wp;
       x.p = C.pay(x, wp, S.hol);
       x.payDate = C.payDate(x.date, wp);
+      x.pm = C.periodOf(x.date, wp).end.slice(0, 7);
       x.off = x.hidden || x.dup;
       x.tr = 0;
       if (!x.off && Number(wp.transport) && !trSeen[x.date + x.wpId]) { trSeen[x.date + x.wpId] = 1; x.tr = Number(wp.transport); }
@@ -221,7 +223,7 @@
     const pct = sm.total ? Math.round(sm.done / sm.total * 100) : 0;
     h += '<div class="card pad sum">'
       + '<div class="lbl">' + (m + 1) + '月に働く分の給料</div>'
-      + '<div class="sum-pie">' + donut([[sm.done, 'recv'], [sm.plan, 'plan']], sm.total, '<b>' + pct + '<small>%</small></b><span>働いた</span>')
+      + '<div class="sum-pie">' + ring(sm.done, sm.total, 0, '<b>' + pct + '<small>%</small></b><span>働いた</span>', 'sm')
       + '<div class="sum-r"><div class="big num">' + yen(sm.total) + '</div>'
       + '<div class="leg"><span><i class="k-done"></i>働いた</span><b class="num">' + yen(sm.done) + '</b></div>'
       + '<div class="leg"><span><i class="k-plan"></i>これから</span><b class="num">' + yen(sm.plan) + '</b></div>'
@@ -254,19 +256,6 @@
     // 選んだ日
     if (!S.stamp) h += dayPanel(S.sel);
     return h;
-  }
-  // 円グラフ（ドーナツ）: parts = [[金額, 色クラス]]。max が合計より大きいと残りは灰色（目標までの残り）
-  function donut(parts, max, center) {
-    const tot = Math.max(max, parts.reduce((a, p) => a + p[0], 0), 1);
-    let off = 25, h = '<div class="donut"><svg viewBox="0 0 42 42" aria-hidden="true"><circle class="d-track" cx="21" cy="21" r="15.915"/>';
-    parts.forEach(p => {
-      const v = p[0] / tot * 100;
-      if (v <= 0) return;
-      const gap = v >= 99.9 ? 0 : 0.6;
-      h += '<circle class="d-' + p[1] + '" cx="21" cy="21" r="15.915" stroke-dasharray="' + Math.max(0.1, v - gap) + ' ' + (100 - v + gap) + '" stroke-dashoffset="' + off + '"/>';
-      off -= v;
-    });
-    return h + '</svg><div class="d-c">' + center + '</div></div>';
   }
   function dayPanel(ds) {
     const list = derive().byDate[ds] || [];
@@ -407,54 +396,107 @@
   }
 
   /* ---------------- 給料 ---------------- */
+  // Shift Board 風の大きなリング。濃い緑＝今日までの給料、薄い緑＝これからの予定、灰色＝目標までの残り
+  function ring(done, total, goal, center, cls, animKey) {
+    const R = 86, L = 2 * Math.PI * R, scale = Math.max(total, goal || 0, 1);
+    const anim = animKey && animKey !== S.ringKey ? ' anim' : '';
+    if (animKey) S.ringKey = animKey;
+    const arc = (v, c) => {
+      if (v <= 0) return '';
+      const a = Math.min(L, v / scale * L);
+      return '<circle class="' + c + '" cx="100" cy="100" r="' + R + '" stroke-dasharray="' + a + ' ' + L + '" style="--a:' + a + '"/>';
+    };
+    return '<div class="ring ' + (cls || '') + anim + '"><svg viewBox="0 0 200 200" aria-hidden="true">'
+      + '<defs><linearGradient id="rg-' + (cls || 'x') + '" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="var(--ring-a)"/><stop offset="1" stop-color="var(--ring-b)"/></linearGradient></defs>'
+      + '<g transform="rotate(-90 100 100)"><circle class="r-track" cx="100" cy="100" r="' + R + '"/>'
+      + arc(total, 'r-plan') + arc(done, 'r-done').replace('class="r-done"', 'class="r-done" stroke="url(#rg-' + (cls || 'x') + ')"')
+      + '</g></svg><div class="r-c">' + center + '</div></div>';
+  }
   function viewPay() {
-    const d = derive(), y = S.year;
+    const d = derive(), today = new Date();
+    const isM = S.payView !== 'y';
+    let h = '<div class="ptabs"><button class="' + (isM ? 'on' : '') + '" data-act="pview" data-v="m">月</button><button class="' + (!isM ? 'on' : '') + '" data-act="pview" data-v="y">年</button></div>';
+    return h + (isM ? viewPayMonth(d, today) : viewPayYear(d, today));
+  }
+  function goalPill(label, v, act) {
+    return '<button class="gpill" data-act="' + act + '">' + (v ? label + ' <b class="num">' + yen(v) + '</b>' : label + 'を設定') + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg></button>';
+  }
+  function viewPayMonth(d, today) {
+    const pm = S.pMonth, key = pm.getFullYear() + '-' + pad(pm.getMonth() + 1);
+    const list = d.on.filter(x => x.pm === key), sm = sumOf(list);
+    const goal = Number(cfg().monthGoal) || 0;
+    const isNow = pm.getFullYear() === today.getFullYear() && pm.getMonth() === today.getMonth();
+    let h = '<div class="p-head"><span class="p-l"></span><b class="p-title">' + pm.getFullYear() + '<small>年</small>' + (pm.getMonth() + 1) + '<small>月</small></b>'
+      + '<span class="p-r">' + (isNow ? '' : '<button class="back-now" data-act="pmNow">' + ICON.cal + '<span>今月に戻る</span></button>') + '</span></div>';
+    h += '<div class="card ring-card"><div class="gp-row">' + goalPill('月間目標', goal, 'setMonthGoal') + '</div>'
+      + '<div class="ring-row"><button class="r-nav" data-act="pmPrev" aria-label="前の月">' + ICON.prev + '</button>'
+      + ring(sm.done, sm.total, goal, '<span class="r-l"><i></i>今日までの給料</span><b class="num">' + yen(sm.done) + '</b>' + (goal ? '<span class="r-s">' + (sm.total >= goal ? '目標達成の見込み 🎉' : '目標まで あと ' + yen(goal - sm.total)) + '</span>' : ''), 'big', 'm' + key)
+      + '<button class="r-nav" data-act="pmNext" aria-label="次の月">' + ICON.next + '</button></div>'
+      + '<div class="r-foot"><span><small>勤務時間</small><b class="num">' + hm(sm.work) + '</b></span><span><small><i class="dot-l"></i>給料見込</small><b class="num">' + yen(sm.total) + '</b></span></div>'
+      + '<button class="btn-line" data-act="pmDetail">給料見込の対象期間・内訳を確認する</button></div>';
+    // 勤務先ごと
+    h += '<div class="card wp-table"><div class="wt-h"><span>勤務時間</span><span>給料見込</span><span>今日まで</span></div>';
+    wps().forEach(w => {
+      const s = sumOf(list.filter(x => x.wpId === w.id));
+      h += '<div class="wt-r"><div class="wt-n"><i style="background:' + w.color + '"></i>' + esc(w.name) + '</div><span class="num">' + hm(s.work) + '</span><span class="num">' + yen(s.total) + '</span><span class="num">' + yen(s.done) + '</span></div>';
+    });
+    h += '</div><p class="hint">月は締め日の月で数えています（末日締めなら、その月に働いた分）。税金・社会保険を引く前の金額です。</p>';
+    return h;
+  }
+  function viewPayYear(d, today) {
+    const y = S.year;
     const list = d.on.filter(x => x.payDate.slice(0, 4) === String(y));
     const sm = sumOf(list);
     const goal = Number(cfg().goal) || 0, wall = Number(cfg().wall) || 0;
-    let h = '<div class="page-h"><h1>給料</h1><div class="ynav"><button class="nav-btn" data-act="yprev">' + ICON.prev + '</button><b>' + y + '年</b><button class="nav-btn" data-act="ynext">' + ICON.next + '</button></div></div>';
-    h += '<div class="card pad hero">'
-      + '<div class="lbl">' + y + '年に受け取る給料（見込み）</div>'
-      + '<div class="pay-pie">' + donut([[sm.recv, 'recv'], [sm.earned, 'earned'], [sm.plan, 'plan']], goal,
-        '<span>見込み</span><b class="num">' + yen(sm.total) + '</b>' + (goal ? '<span>目標の ' + Math.floor(sm.total / goal * 100) + '%</span>' : '')) + '</div>'
-      + (goal && sm.total < goal ? '<p class="pie-note">グレーは目標までの残り</p>' : '')
-      + '<div class="rows3">'
-      + '<div><i class="k-recv"></i><span>受け取った</span><b class="num">' + yen(sm.recv) + '</b></div>'
-      + '<div><i class="k-earned"></i><span>働いた・振込待ち</span><b class="num">' + yen(sm.earned) + '</b></div>'
-      + '<div><i class="k-plan"></i><span>シフト予定</span><b class="num">' + yen(sm.plan) + '</b></div></div>';
+    let h = '<div class="p-head"><span class="p-l"></span><b class="p-title">' + y + '<small>年</small></b><span class="p-r">' + (y === today.getFullYear() ? '' : '<button class="back-now" data-act="pyNow">' + ICON.cal + '<span>今年に戻る</span></button>') + '</span></div>';
+    h += '<div class="card ring-card"><div class="gp-row">' + goalPill('年間目標', goal, 'setGoal') + '</div>'
+      + '<div class="ring-row"><button class="r-nav" data-act="yprev" aria-label="前の年">' + ICON.prev + '</button>'
+      + ring(sm.done, sm.total, goal, '<span class="r-l"><i></i>今日までの給料</span><b class="num">' + yen(sm.done) + '</b><span class="r-s">うち受取済 ' + yen(sm.recv) + '</span>', 'big', 'y' + y)
+      + '<button class="r-nav" data-act="ynext" aria-label="次の年">' + ICON.next + '</button></div>'
+      + '<div class="r-foot"><span><small>勤務時間</small><b class="num">' + hm(sm.work) + '</b></span><span><small><i class="dot-l"></i>年収見込</small><b class="num">' + yen(sm.total) + '</b></span></div>';
     const notes = [];
-    if (goal) notes.push(sm.total >= goal ? '<span class="ok">目標の ' + yen(goal) + ' に届く見込み 🎉</span>' : '目標 ' + yen(goal) + ' まで あと <b>' + yen(goal - sm.total) + '</b>（受け取り済みは ' + Math.floor(sm.recv / goal * 100) + '%）');
+    if (goal) notes.push(sm.total >= goal ? '<span class="ok">年間目標 ' + yen(goal) + ' に届く見込み 🎉</span>' : '年間目標まで あと <b>' + yen(goal - sm.total) + '</b>');
     if (wall) notes.push(sm.total > wall ? '<span class="ng">' + man(wall) + '円の壁を ' + yen(sm.total - wall) + ' 超える見込みです</span>' : man(wall) + '円の壁まで あと <b>' + yen(wall - sm.total) + '</b>');
     if (notes.length) h += '<div class="notes">' + notes.map(n => '<p>' + n + '</p>').join('') + '</div>';
-    h += '<div class="kpis"><div class="kpi"><b class="num">' + hShort(sm.work) + '</b><span>働く時間</span></div><div class="kpi"><b class="num">' + sm.dayN + '<small>日</small></b><span>出勤日</span></div><div class="kpi"><b class="num">' + yen(sm.work ? (sm.total - sm.tr) / sm.work * 60 : 0) + '</b><span>平均時給</span></div></div>';
-    h += '</div>';
+    h += '<div class="rows3">'
+      + '<div><i class="k-recv"></i><span>受け取った</span><b class="num">' + yen(sm.recv) + '</b></div>'
+      + '<div><i class="k-earned"></i><span>働いた・振込待ち</span><b class="num">' + yen(sm.earned) + '</b></div>'
+      + '<div><i class="k-plan"></i><span>シフト予定</span><b class="num">' + yen(sm.plan) + '</b></div></div></div>';
 
     // 月ごと（給料日の月）
     const months = [];
     for (let i = 0; i < 12; i++) { const k = y + '-' + pad(i + 1); months.push(sumOf(list.filter(x => x.payDate.slice(0, 7) === k))); }
     const mmax = Math.max(1, ...months.map(o => o.total));
-    h += '<div class="sec-h"><span>月ごとの給料（振込月）</span></div><div class="card pad"><div class="mbars">';
+    h += '<div class="sec-h"><span>月ごとの振込</span></div><div class="card pad"><div class="mbars">';
     months.forEach((o, i) => {
       const hp = v => (v / mmax * 100) + '%';
       h += '<button class="mb' + (S.payMonth === i ? ' on' : '') + '" data-act="pm" data-i="' + i + '"><div class="st"><i class="k-plan" style="height:' + hp(o.plan) + '"></i><i class="k-earned" style="height:' + hp(o.earned) + '"></i><i class="k-recv" style="height:' + hp(o.recv) + '"></i></div><span>' + (i + 1) + '</span></button>';
     });
     h += '</div>';
-    const pm = months[S.payMonth], pk = y + '-' + pad(S.payMonth + 1);
-    h += '<div class="pm-sum"><b>' + (S.payMonth + 1) + '月の振込</b><b class="num">' + yen(pm.total) + '</b></div>';
-    // 給料日×勤務先ごと
+    const pmo = months[S.payMonth], pk = y + '-' + pad(S.payMonth + 1);
+    h += '<div class="pm-sum"><b>' + (S.payMonth + 1) + '月の振込</b><b class="num">' + yen(pmo.total) + '</b></div>';
+    h += payRows(list.filter(x => x.payDate.slice(0, 7) === pk), 'この月の振込はありません') + '</div>';
+    h += '<p class="hint">「受け取った」は給料日を過ぎた分、「振込待ち」は働き終わって給料日前の分、「シフト予定」はこれからのシフトです。年の区切りは振込日（扶養の判定と同じ）。税金・社会保険は引く前の金額です。</p>';
+    return h;
+  }
+  // 給料日×勤務先ごとの行
+  function payRows(list, emptyMsg) {
     const groups = {};
-    list.filter(x => x.payDate.slice(0, 7) === pk).forEach(x => { const g = x.payDate + '|' + x.wpId; (groups[g] = groups[g] || []).push(x); });
+    list.forEach(x => { const g = x.payDate + '|' + x.wpId; (groups[g] = groups[g] || []).push(x); });
     const keys = Object.keys(groups).sort();
-    if (!keys.length) h += '<div class="empty small">この月の振込はありません</div>';
-    keys.forEach(k => {
+    if (!keys.length) return '<div class="empty small">' + emptyMsg + '</div>';
+    return keys.map(k => {
       const g = groups[k], s = sumOf(g), w = g[0].wp, pd = k.split('|')[0];
       const st = pd <= ymd(new Date()) ? 'recv' : s.plan ? 'plan' : 'earned';
       const per = C.periodOf(g[0].date, w);
-      h += '<button class="payrow" data-act="payDetail" data-k="' + k + '"><i class="bar" style="background:' + w.color + '"></i><div class="main"><b>' + esc(w.name) + '</b><div class="t2">' + md(pd) + ' 支給・' + md(per.start) + '〜' + md(per.end) + '分・' + s.n + '回 ' + hShort(s.work) + '</div></div><div class="r"><b class="num">' + yen(s.total) + '</b><span class="tag s-' + st + '">' + (st === 'recv' ? '受取済' : st === 'plan' ? '予定あり' : '振込待ち') + '</span></div></button>';
-    });
-    h += '</div>';
-    h += '<p class="hint">「受け取った」は給料日を過ぎた分、「振込待ち」は働き終わって給料日前の分、「シフト予定」はこれからのシフトです。年の区切りは振込日（扶養の判定と同じ）。税金・社会保険は引く前の金額です。</p>';
-    return h;
+      return '<button class="payrow" data-act="payDetail" data-k="' + k + '"><i class="bar" style="background:' + w.color + '"></i><div class="main"><b>' + esc(w.name) + '</b><div class="t2">' + md(pd) + ' 支給・' + md(per.start) + '〜' + md(per.end) + '分・' + s.n + '回 ' + hShort(s.work) + '</div></div><div class="r"><b class="num">' + yen(s.total) + '</b><span class="tag s-' + st + '">' + (st === 'recv' ? '受取済' : st === 'plan' ? '予定あり' : '振込待ち') + '</span></div></button>';
+    }).join('');
+  }
+  const hm = m => Math.floor(m / 60) + '<small>h</small>' + pad(Math.round(m % 60)) + '<small>m</small>';
+  function pmDetail() {
+    const pm = S.pMonth, key = pm.getFullYear() + '-' + pad(pm.getMonth() + 1);
+    const list = derive().on.filter(x => x.pm === key);
+    openSheet((pm.getMonth() + 1) + '月の給料見込の内訳', '勤務先ごとの締め期間と支給日', '<div class="card">' + payRows(list, 'この月のシフトはありません') + '</div>');
   }
   function payDetail(k) {
     const [pd, wpId] = k.split('|');
@@ -675,6 +717,19 @@
       case 'yprev': S.year--; render(); break;
       case 'ynext': S.year++; render(); break;
       case 'pm': S.payMonth = Number(b.dataset.i); render(); break;
+      case 'pview': S.payView = b.dataset.v; store.set('shiftlog:pview', S.payView); render(); break;
+      case 'pmPrev': S.pMonth = new Date(S.pMonth.getFullYear(), S.pMonth.getMonth() - 1, 1); render(); break;
+      case 'pmNext': S.pMonth = new Date(S.pMonth.getFullYear(), S.pMonth.getMonth() + 1, 1); render(); break;
+      case 'pmNow': { const t = new Date(); S.pMonth = new Date(t.getFullYear(), t.getMonth(), 1); render(); break; }
+      case 'pyNow': S.year = new Date().getFullYear(); render(); break;
+      case 'pmDetail': pmDetail(); break;
+      case 'setMonthGoal': case 'setGoal': {
+        const k = a === 'setGoal' ? 'goal' : 'monthGoal';
+        const v = prompt((k === 'goal' ? '年間' : '月間') + '目標（円）', cfg()[k] || '');
+        if (v == null) break;
+        cfg()[k] = Math.max(0, Math.round(Number(String(v).replace(/[^0-9]/g, '')) || 0));
+        persist(); render(); break;
+      }
       case 'payDetail': payDetail(b.dataset.k); break;
       case 'newWp': S.tab = 'wp'; store.set(K.tab, 'wp'); render(); openWp(null); break;
       case 'editWp': openWp(b.dataset.id); break;

@@ -1,5 +1,5 @@
 // アプリ本体をキャッシュして、電波が弱くても起動できるようにする。
-const CACHE = 'shiftlog-v3';
+const CACHE = 'shiftlog-v4';
 const SHELL = ['./', 'index.html', 'style.css', 'calc.js', 'demo.js', 'app.js', 'manifest.webmanifest', 'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
