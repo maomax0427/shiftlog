@@ -25,7 +25,7 @@
     year: now0.getFullYear(),
     payMonth: now0.getMonth(),
     data: null, hol: {}, syncing: false, lastSync: null, dirty: store.get(K.dirty, false),
-    stamp: null, form: null, wpForm: null, cals: null, rev: 0, oldScript: false, tplEdit: false,
+    stamp: null, form: null, wpForm: null, cals: null, rev: 0, oldScript: false, ver: store.get('shiftlog:ver', 0), tplEdit: false,
   };
   if (S.api) S.mode = 'api';
 
@@ -154,7 +154,7 @@
       if (j.config && fresh) S.data.config = Object.assign({}, DEF_CFG, j.config);
       if (fresh) S.data.shifts = j.shifts || [];
       S.data.events = j.events || [];
-      S.oldScript = !(j.version >= 2);
+      S.oldScript = !(j.version >= 2); S.ver = j.version || 1; store.set('shiftlog:ver', S.ver);
       S.lastSync = Date.now();
       D = null; saveLocal();
       if (!quiet) toast('カレンダーから ' + derive().all.filter(x => x.src === 'gcal').length + ' 件のシフトを読み込みました');
@@ -215,16 +215,17 @@
       + (S.mode === 'api' ? '<button class="icon-btn' + (S.syncing ? ' spin' : '') + '" data-act="sync" aria-label="カレンダーと同期">' + ICON.sync + '</button>' : '')
       + '</div>';
     if (S.mode === 'demo') h += '<div class="banner">お試しデータを表示中<button class="btn sm gray" data-act="gotoSet">はじめる</button></div>';
-    if (S.oldScript) h += '<div class="banner">Apps Script を更新すると同期が速くなります<button class="btn sm gray" data-act="gotoSet">手順</button></div>';
     if (!wps().length) h += '<div class="banner">まず「勤務先」で時給とカレンダーのキーワードを登録してください<button class="btn sm gray" data-act="newWp">登録</button></div>';
 
     // 今月のサマリー
-    const bar = moneyBar(sm, Math.max(sm.total, 1));
+    const pct = sm.total ? Math.round(sm.done / sm.total * 100) : 0;
     h += '<div class="card pad sum">'
-      + '<div class="sum-top"><div><div class="lbl">' + (m + 1) + '月に働く分の給料</div><div class="big num">' + yen(sm.total) + '</div></div>'
-      + '<div class="sum-side num"><b>' + hShort(sm.work) + '</b><span>' + sm.dayN + '日</span></div></div>'
-      + bar
-      + '<div class="legend3"><span><i class="k-done"></i>働いた ' + yen(sm.done) + '</span><span><i class="k-plan"></i>これから ' + yen(sm.plan) + '</span></div>'
+      + '<div class="lbl">' + (m + 1) + '月に働く分の給料</div>'
+      + '<div class="sum-pie">' + donut([[sm.done, 'recv'], [sm.plan, 'plan']], sm.total, '<b>' + pct + '<small>%</small></b><span>働いた</span>')
+      + '<div class="sum-r"><div class="big num">' + yen(sm.total) + '</div>'
+      + '<div class="leg"><span><i class="k-done"></i>働いた</span><b class="num">' + yen(sm.done) + '</b></div>'
+      + '<div class="leg"><span><i class="k-plan"></i>これから</span><b class="num">' + yen(sm.plan) + '</b></div>'
+      + '<div class="leg sub"><span>' + hShort(sm.work) + '・' + sm.dayN + '日</span></div></div></div>'
       + (perWp.length > 1 ? '<div class="wp-split">' + perWp.map(o => '<span><i style="background:' + o.w.color + '"></i>' + esc(o.w.name) + ' <b class="num">' + yen(o.s.total) + '</b></span>').join('') + '</div>' : '')
       + '</div>';
 
@@ -254,9 +255,18 @@
     if (!S.stamp) h += dayPanel(S.sel);
     return h;
   }
-  function moneyBar(sm, max) {
-    const pc = v => Math.max(0, Math.min(100, v / max * 100));
-    return '<div class="mbar"><i class="k-recv" style="width:' + pc(sm.recv) + '%"></i><i class="k-earned" style="width:' + pc(sm.earned) + '%"></i><i class="k-plan" style="width:' + pc(sm.plan) + '%"></i></div>';
+  // 円グラフ（ドーナツ）: parts = [[金額, 色クラス]]。max が合計より大きいと残りは灰色（目標までの残り）
+  function donut(parts, max, center) {
+    const tot = Math.max(max, parts.reduce((a, p) => a + p[0], 0), 1);
+    let off = 25, h = '<div class="donut"><svg viewBox="0 0 42 42" aria-hidden="true"><circle class="d-track" cx="21" cy="21" r="15.915"/>';
+    parts.forEach(p => {
+      const v = p[0] / tot * 100;
+      if (v <= 0) return;
+      const gap = v >= 99.9 ? 0 : 0.6;
+      h += '<circle class="d-' + p[1] + '" cx="21" cy="21" r="15.915" stroke-dasharray="' + Math.max(0.1, v - gap) + ' ' + (100 - v + gap) + '" stroke-dashoffset="' + off + '"/>';
+      off -= v;
+    });
+    return h + '</svg><div class="d-c">' + center + '</div></div>';
   }
   function dayPanel(ds) {
     const list = derive().byDate[ds] || [];
@@ -402,12 +412,12 @@
     const list = d.on.filter(x => x.payDate.slice(0, 4) === String(y));
     const sm = sumOf(list);
     const goal = Number(cfg().goal) || 0, wall = Number(cfg().wall) || 0;
-    const max = Math.max(sm.total, goal, wall, 1) * 1.04;
-    const mark = (v, cls, label) => v ? '<i class="mk ' + cls + '" style="left:' + (v / max * 100) + '%"><span>' + label + '</span></i>' : '';
     let h = '<div class="page-h"><h1>給料</h1><div class="ynav"><button class="nav-btn" data-act="yprev">' + ICON.prev + '</button><b>' + y + '年</b><button class="nav-btn" data-act="ynext">' + ICON.next + '</button></div></div>';
     h += '<div class="card pad hero">'
-      + '<div class="lbl">' + y + '年に受け取る給料（見込み）</div><div class="big num">' + yen(sm.total) + '</div>'
-      + '<div class="mbar-wrap">' + moneyBar(sm, max) + mark(goal, 'goal', '目標') + mark(wall, 'wall', man(wall)) + '</div>'
+      + '<div class="lbl">' + y + '年に受け取る給料（見込み）</div>'
+      + '<div class="pay-pie">' + donut([[sm.recv, 'recv'], [sm.earned, 'earned'], [sm.plan, 'plan']], goal,
+        '<span>見込み</span><b class="num">' + yen(sm.total) + '</b>' + (goal ? '<span>目標の ' + Math.floor(sm.total / goal * 100) + '%</span>' : '')) + '</div>'
+      + (goal && sm.total < goal ? '<p class="pie-note">グレーは目標までの残り</p>' : '')
       + '<div class="rows3">'
       + '<div><i class="k-recv"></i><span>受け取った</span><b class="num">' + yen(sm.recv) + '</b></div>'
       + '<div><i class="k-earned"></i><span>働いた・振込待ち</span><b class="num">' + yen(sm.earned) + '</b></div>'
@@ -536,6 +546,7 @@
     h += '<div class="sec-h"><span>Googleカレンダー連携</span></div><div class="card">';
     if (S.mode === 'api') {
       h += '<div class="set-row"><div class="l"><span class="status-dot on"></span>つながっています<small>' + (S.lastSync ? '最終同期 ' + new Date(S.lastSync).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'まだ同期していません') + '</small></div><button class="btn sm soft" data-act="sync">今すぐ同期</button></div>'
+        + (S.ver ? '<div class="set-row"><div class="l">Apps Script<small>' + (S.ver >= 2 ? '最新版で動いています' : '古い版です（下の手順で更新）') + '</small></div><span class="tag ' + (S.ver >= 2 ? 's-recv' : 'warn') + '">v' + S.ver + (S.ver >= 2 ? ' ✓' : '') + '</span></div>' : '')
         + '<div class="set-row"><div class="l">読み込むカレンダー<small>' + (c.calendarIds && c.calendarIds.length ? c.calendarIds.length + '個を選択中' : 'メインのカレンダー') + '</small></div><button class="btn sm gray" data-act="pickCal">選ぶ</button></div>'
         + (S.oldScript ? '<div class="guide upd"><b>⚡ 同期を速くする（Apps Script の更新）</b><ol>'
           + '<li>スプレッドシートの 拡張機能 → Apps Script を開き、中身を消して最新の <a class="link" href="https://github.com/maomax0427/shiftlog/blob/main/apps-script/Code.gs" target="_blank" rel="noopener">Code.gs</a> を貼り付けて保存</li>'
