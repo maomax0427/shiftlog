@@ -75,6 +75,8 @@
     all.forEach(x => { if (x.src === 'gcal' && !x.hidden) (gByDay[x.date + x.wpId] = gByDay[x.date + x.wpId] || []).push(x); });
     all.forEach(x => { if (x.src === 'manual') x.dup = (gByDay[x.date + x.wpId] || []).some(g => g.s < x.e && x.s < g.e); });
     all.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.s - b.s);
+    // 給料実績が入っている期間のシフトは、計算せず実績の金額を使う
+    const acts = (cfg().actuals || []).filter(a => wpById(a.wpId));
     const trSeen = {};
     const byDate = {};
     all.forEach(x => {
@@ -84,20 +86,35 @@
       x.payDate = C.payDate(x.date, wp);
       x.pm = C.periodOf(x.date, wp).end.slice(0, 7);
       x.off = x.hidden || x.dup;
+      x.covered = acts.some(a => a.wpId === x.wpId && x.date >= a.start && x.date <= a.end);
+      x.skip = x.off || x.covered;
       x.tr = 0;
-      if (!x.off && Number(wp.transport) && !trSeen[x.date + x.wpId]) { trSeen[x.date + x.wpId] = 1; x.tr = Number(wp.transport); }
-      x.total = x.off ? 0 : x.p.amount + x.tr;
+      if (!x.skip && Number(wp.transport) && !trSeen[x.date + x.wpId]) { trSeen[x.date + x.wpId] = 1; x.tr = Number(wp.transport); }
+      x.total = x.skip ? 0 : x.p.amount + x.tr;
       x.state = x.endMs > nowMs ? 'plan' : x.payDate <= today ? 'recv' : 'earned';
       (byDate[x.date] = byDate[x.date] || []).push(x);
     });
     const hid = cfg().hiddenTpl || [];
-    D = { all, byDate, on: all.filter(x => !x.off), tpl: C.templates(all.filter(x => !x.off && x.date <= today || x.src === 'manual'), 8, hid) };
+    const on = all.filter(x => !x.skip);
+    acts.forEach(a => {
+      const wp = wpById(a.wpId), pd = a.payDate || C.payDate(a.end, wp);
+      const salary = Number(a.salary) || 0, tr = Number(a.transport) || 0;
+      on.push({ id: 'act:' + a.id, src: 'actual', a, date: a.end, wpId: a.wpId, wp, days: Number(a.days) || 1,
+        p: { work: Number(a.minutes) || 0, night: 0, ot: 0, brk: 0, wage: 0, amount: salary }, tr, total: salary + tr,
+        payDate: pd, pm: a.pm || C.periodOf(a.end, wp).end.slice(0, 7), state: pd <= today ? 'recv' : 'earned' });
+    });
+    on.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    D = { all, byDate, on, acts, tpl: C.templates(all.filter(x => !x.off && x.date <= today || x.src === 'manual'), 8, hid) };
     if (D.tpl.length < 3) D.tpl = C.templates(all.filter(x => !x.off), 8, hid);
     return D;
   }
   function sumOf(list) {
     const r = { total: 0, recv: 0, earned: 0, plan: 0, work: 0, night: 0, tr: 0, n: 0, days: {} };
-    list.forEach(x => { r.total += x.total; r[x.state] += x.total; r.work += x.p.work; r.night += x.p.night; r.tr += x.tr; r.n++; r.days[x.date] = 1; });
+    list.forEach(x => {
+      r.total += x.total; r[x.state] += x.total; r.work += x.p.work; r.night += x.p.night; r.tr += x.tr;
+      if (x.src === 'actual') { r.n += x.days; for (let i = 0; i < x.days; i++) r.days[x.id + i] = 1; r.act = (r.act || 0) + x.total; }
+      else { r.n++; r.days[x.date] = 1; }
+    });
     r.dayN = Object.keys(r.days).length;
     r.done = r.recv + r.earned;
     return r;
@@ -117,9 +134,12 @@
   function keywords() { const k = []; wps().forEach(w => (w.keywords || []).forEach(x => x && k.push(x))); return k; }
   function listRows() {
     const stL = { recv: '受取済', earned: '振込待ち', plan: '予定' };
-    return derive().all.map(x => [x.date, WD[toDate(x.date).getDay()], x.wp.name, m2hm(x.s), m2hm(x.e), x.p.brk,
-      Math.round(x.p.work / 6) / 10, Math.round(x.p.night / 6) / 10, x.p.wage, x.off ? 0 : x.p.amount, x.tr, x.payDate,
-      x.src === 'gcal' ? 'カレンダー' : '手入力', x.hidden ? '除外' : x.dup ? '重複(カレンダー優先)' : stL[x.state]]);
+    const d = derive();
+    return d.all.map(x => [x.date, WD[toDate(x.date).getDay()], x.wp.name, m2hm(x.s), m2hm(x.e), x.p.brk,
+      Math.round(x.p.work / 6) / 10, Math.round(x.p.night / 6) / 10, x.p.wage, x.skip ? 0 : x.p.amount, x.tr, x.payDate,
+      x.src === 'gcal' ? 'カレンダー' : '手入力', x.hidden ? '除外' : x.dup ? '重複(カレンダー優先)' : x.covered ? '実績に含む' : stL[x.state]])
+      .concat(d.on.filter(x => x.src === 'actual').map(x => [x.a.end, '', x.wp.name, x.a.start, x.a.end, '', Math.round(x.p.work / 6) / 10, 0, '', x.p.amount, x.tr, x.payDate, '給料実績', stL[x.state]]))
+      .sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
   }
   function saveLocal() {
     store.set(dataKey(), { config: S.data.config, shifts: S.data.shifts, events: S.data.events, at: S.lastSync });
@@ -194,6 +214,7 @@
     prev: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5-7 7 7 7"/></svg>',
     next: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"/></svg>',
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+    pen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
     stamp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6v5l-1.5 3h4.5a2 2 0 0 1 2 2v2H4v-2a2 2 0 0 1 2-2h4.5L9 8z"/><path d="M5 19h14"/></svg>',
   };
   const TABS = [['cal', 'シフト'], ['pay', '給料'], ['wp', '勤務先'], ['set', '設定']];
@@ -270,13 +291,13 @@
   }
   function shiftRow(x, showDate) {
     const badge = x.src === 'gcal' ? '<span class="tag g">カレンダー</span>' : '<span class="tag">手入力</span>';
-    const st = x.hidden ? '<span class="tag warn">除外中</span>' : x.dup ? '<span class="tag warn">カレンダーと重複</span>' : '<span class="tag s-' + x.state + '">' + stateLabel[x.state] + '</span>';
+    const st = x.hidden ? '<span class="tag warn">除外中</span>' : x.dup ? '<span class="tag warn">カレンダーと重複</span>' : x.covered ? '<span class="tag s-recv">給料実績で計算</span>' : '<span class="tag s-' + x.state + '">' + stateLabel[x.state] + '</span>';
     return '<button class="shift' + (x.off ? ' off' : '') + '" data-act="edit" data-id="' + esc(x.id) + '">'
       + '<i class="bar" style="background:' + x.wp.color + '"></i>'
       + '<div class="main"><div class="t1">' + (showDate ? '<span class="muted">' + mdw(x.date) + '</span> ' : '') + '<b>' + esc(x.wp.name) + '</b> <span class="num">' + tRange(x) + '</span></div>'
       + '<div class="t2">実働 ' + hours(x.p.work) + (x.p.brk ? '・休憩' + x.p.brk + '分' : '') + (x.p.night ? '・深夜' + hShort(x.p.night) : '') + (x.p.ot ? '・残業' + hShort(x.p.ot) : '') + (x.memo ? '・' + esc(x.memo) : '') + '</div>'
       + '<div class="tags">' + badge + st + '</div></div>'
-      + '<div class="amt num">' + yen(x.off ? x.p.amount : x.total) + (x.tr ? '<small>交通費込</small>' : '') + '</div></button>';
+      + '<div class="amt num' + (x.covered && !x.off ? ' cov' : '') + '">' + yen(x.skip ? x.p.amount : x.total) + (x.tr ? '<small>交通費込</small>' : '') + '</div></button>';
   }
 
   /* ---------------- まとめて入力（スタンプ） ---------------- */
@@ -435,10 +456,11 @@
       + '<div class="r-foot"><span><small>勤務時間</small><b class="num">' + hm(sm.work) + '</b></span><span><small><i class="dot-l"></i>給料見込</small><b class="num">' + yen(sm.total) + '</b></span></div>'
       + '<button class="btn-line" data-act="pmDetail">給料見込の対象期間・内訳を確認する</button></div>';
     // 勤務先ごと
-    h += '<div class="card wp-table"><div class="wt-h"><span>勤務時間</span><span>給料見込</span><span>今日まで</span></div>';
+    h += '<div class="card wp-table"><div class="wt-h"><span>勤務時間</span><span>給料見込</span><span>給料実績</span></div>';
     wps().forEach(w => {
       const s = sumOf(list.filter(x => x.wpId === w.id));
-      h += '<div class="wt-r"><div class="wt-n"><i style="background:' + w.color + '"></i>' + esc(w.name) + '</div><span class="num">' + hm(s.work) + '</span><span class="num">' + yen(s.total) + '</span><span class="num">' + yen(s.done) + '</span></div>';
+      h += '<div class="wt-r"><div class="wt-n"><i style="background:' + w.color + '"></i>' + esc(w.name) + '</div><span class="num">' + hm(s.work) + '</span><span class="num">' + yen(s.total) + '</span>'
+        + '<button class="wt-act' + (s.act ? ' on' : '') + '" data-act="editAct" data-wp="' + w.id + '" data-pm="' + key + '"><span class="num">' + (s.act ? yen(s.act) : '未入力') + '</span>' + ICON.pen + '</button></div>';
     });
     h += '</div><p class="hint">月は締め日の月で数えています（末日締めなら、その月に働いた分）。税金・社会保険を引く前の金額です。</p>';
     return h;
@@ -488,8 +510,8 @@
     return keys.map(k => {
       const g = groups[k], s = sumOf(g), w = g[0].wp, pd = k.split('|')[0];
       const st = pd <= ymd(new Date()) ? 'recv' : s.plan ? 'plan' : 'earned';
-      const per = C.periodOf(g[0].date, w);
-      return '<button class="payrow" data-act="payDetail" data-k="' + k + '"><i class="bar" style="background:' + w.color + '"></i><div class="main"><b>' + esc(w.name) + '</b><div class="t2">' + md(pd) + ' 支給・' + md(per.start) + '〜' + md(per.end) + '分・' + s.n + '回 ' + hShort(s.work) + '</div></div><div class="r"><b class="num">' + yen(s.total) + '</b><span class="tag s-' + st + '">' + (st === 'recv' ? '受取済' : st === 'plan' ? '予定あり' : '振込待ち') + '</span></div></button>';
+      const per = g[0].src === 'actual' ? { start: g[0].a.start, end: g[0].a.end } : C.periodOf(g[0].date, w);
+      return '<button class="payrow" data-act="payDetail" data-k="' + k + '"><i class="bar" style="background:' + w.color + '"></i><div class="main"><b>' + esc(w.name) + '</b><div class="t2">' + md(pd) + ' 支給・' + md(per.start) + '〜' + md(per.end) + '分・' + s.n + '回 ' + hShort(s.work) + (g.some(x => x.src === 'actual') ? '・実績' : '') + '</div></div><div class="r"><b class="num">' + yen(s.total) + '</b><span class="tag s-' + st + '">' + (st === 'recv' ? '受取済' : st === 'plan' ? '予定あり' : '振込待ち') + '</span></div></button>';
     }).join('');
   }
   const hm = m => Math.floor(m / 60) + '<small>h</small>' + pad(Math.round(m % 60)) + '<small>m</small>';
@@ -498,12 +520,56 @@
     const list = derive().on.filter(x => x.pm === key);
     openSheet((pm.getMonth() + 1) + '月の給料見込の内訳', '勤務先ごとの締め期間と支給日', '<div class="card">' + payRows(list, 'この月のシフトはありません') + '</div>');
   }
+  function actRow(x) {
+    return '<button class="shift" data-act="editAct" data-wp="' + x.wpId + '" data-pm="' + x.pm + '"><i class="bar" style="background:' + x.wp.color + '"></i>'
+      + '<div class="main"><div class="t1"><b>給料実績</b> <span class="muted">' + md(x.a.start) + '〜' + md(x.a.end) + '</span></div>'
+      + '<div class="t2">給与 ' + yen(x.p.amount) + '・交通費 ' + yen(x.tr) + (x.p.work ? '・' + hours(x.p.work) : '') + '・' + x.days + '日</div></div>'
+      + '<div class="amt num">' + yen(x.total) + '</div></button>';
+  }
+  // 給料実績（明細の金額）の入力。1か月に締め期間が2つある月もあるので、期間ごとに入れられる
+  function openAct(wpId, pmKey) {
+    const w = wpById(wpId);
+    const list = (cfg().actuals || []).filter(a => a.wpId === wpId && (a.pm || C.periodOf(a.end, w).end.slice(0, 7)) === pmKey);
+    S.actForm = { wpId, pm: pmKey, rows: list.length ? JSON.parse(JSON.stringify(list)) : [newAct(w, pmKey)] };
+    const y = Number(pmKey.slice(0, 4)), m = Number(pmKey.slice(5, 7));
+    openSheet(esc(w.name) + ' ' + y + '年' + m + '月の給料実績', '明細の金額を入れると、この期間はシフトの計算より優先されます', actForm());
+  }
+  function newAct(w, pmKey) {
+    const per = C.periodOf(pmKey + '-01', w);
+    return { id: uid(), wpId: w.id, pm: pmKey, start: per.start, end: per.end, salary: '', transport: '', minutes: 0, days: '' };
+  }
+  function actForm() {
+    const f = S.actForm;
+    let h = '';
+    f.rows.forEach((r, i) => {
+      h += '<div class="card form mt">'
+        + '<div class="f-row"><span>期間</span><div class="times"><input class="in dt" type="date" data-ac="start" data-i="' + i + '" value="' + r.start + '"><em>〜</em><input class="in dt" type="date" data-ac="end" data-i="' + i + '" value="' + r.end + '"></div></div>'
+        + '<div class="f-row"><span>給与（今月の給料）</span><div class="brk"><input class="in num" type="number" inputmode="numeric" data-ac="salary" data-i="' + i + '" value="' + esc(r.salary) + '"><em>円</em></div></div>'
+        + '<div class="f-row"><span>交通費</span><div class="brk"><input class="in num" type="number" inputmode="numeric" data-ac="transport" data-i="' + i + '" value="' + esc(r.transport) + '"><em>円</em></div></div>'
+        + '<div class="f-row"><span>出勤日数（任意）</span><div class="brk"><input class="in num" type="number" inputmode="numeric" data-ac="days" data-i="' + i + '" value="' + esc(r.days) + '"><em>日</em></div></div>'
+        + (f.rows.length > 1 ? '<button class="add-row del" data-act="actDelRow" data-i="' + i + '">この期間を消す</button>' : '')
+        + '</div>';
+    });
+    h += '<button class="add-row" data-act="actAddRow">' + ICON.plus + '締め期間を追加（1か月に2回締めがあるとき）</button>';
+    h += '<button class="btn primary block mt" data-act="saveAct">保存</button>';
+    h += '<button class="btn danger block mt" data-act="clearAct">実績を消してシフトから計算に戻す</button>';
+    return h;
+  }
+  function saveAct(clear) {
+    const f = S.actForm, w = wpById(f.wpId);
+    const keep = (cfg().actuals || []).filter(a => !(a.wpId === f.wpId && (a.pm || C.periodOf(a.end, w).end.slice(0, 7)) === f.pm));
+    const rows = clear ? [] : f.rows.filter(r => r.salary !== '' && r.start && r.end).map(r => ({
+      id: r.id, wpId: f.wpId, pm: f.pm, start: r.start <= r.end ? r.start : r.end, end: r.start <= r.end ? r.end : r.start,
+      salary: Number(r.salary) || 0, transport: Number(r.transport) || 0, minutes: Number(r.minutes) || 0, days: Number(r.days) || 0 }));
+    cfg().actuals = keep.concat(rows);
+    persist(); closeSheet(); render();
+  }
   function payDetail(k) {
     const [pd, wpId] = k.split('|');
     const list = derive().on.filter(x => x.payDate === pd && x.wpId === wpId);
     const s = sumOf(list), w = wpById(wpId);
     let h = '<div class="card pad"><div class="pv"><div><span class="lbl">実働</span><b class="num">' + hours(s.work) + '</b><small>' + s.n + '回' + (s.night ? '・深夜' + hShort(s.night) : '') + '</small></div><div class="r"><span class="lbl">支給額（見込み）</span><b class="num big2">' + yen(s.total) + '</b><small>' + (s.tr ? '交通費 ' + yen(s.tr) + ' 込み' : '') + '</small></div></div></div>';
-    h += '<div class="card mt">' + list.map(x => shiftRow(x, true)).join('') + '</div>';
+    h += '<div class="card mt">' + list.map(x => x.src === 'actual' ? actRow(x) : shiftRow(x, true)).join('') + '</div>';
     openSheet(esc(w.name) + ' ' + md(pd) + ' 支給', '', h);
   }
 
@@ -669,7 +735,7 @@
   }
   function closeSheet() {
     $('#sheet').hidden = true; $('#sheetBack').hidden = true; document.body.style.overflow = '';
-    S.form = null; S.wpForm = null; S.tplEdit = false;
+    S.form = null; S.wpForm = null; S.actForm = null; S.tplEdit = false;
   }
   const rerenderSheet = html => { const b = $('#sheet .sh-b'); const t = b.scrollTop; b.innerHTML = html; b.scrollTop = t; };
 
@@ -723,6 +789,11 @@
       case 'pmNow': { const t = new Date(); S.pMonth = new Date(t.getFullYear(), t.getMonth(), 1); render(); break; }
       case 'pyNow': S.year = new Date().getFullYear(); render(); break;
       case 'pmDetail': pmDetail(); break;
+      case 'editAct': openAct(b.dataset.wp, b.dataset.pm); break;
+      case 'actAddRow': S.actForm.rows.push(newAct(wpById(S.actForm.wpId), S.actForm.pm)); rerenderSheet(actForm()); break;
+      case 'actDelRow': S.actForm.rows.splice(Number(b.dataset.i), 1); rerenderSheet(actForm()); break;
+      case 'saveAct': saveAct(false); break;
+      case 'clearAct': if (confirm('この月の給料実績を消しますか？')) saveAct(true); break;
       case 'setMonthGoal': case 'setGoal': {
         const k = a === 'setGoal' ? 'goal' : 'monthGoal';
         const v = prompt((k === 'goal' ? '年間' : '月間') + '目標（円）', cfg()[k] || '');
@@ -774,6 +845,8 @@
     } else if (t.dataset.w && S.wpForm) {
       S.wpForm[t.dataset.w] = t.type === 'checkbox' ? t.checked : t.value;
       if (t.dataset.w === 'breakMode') rerenderSheet(wpFormHtml());
+    } else if (t.dataset.ac && S.actForm) {
+      S.actForm.rows[Number(t.dataset.i)][t.dataset.ac] = t.value;
     } else if (t.dataset.wg && S.wpForm) {
       S.wpForm.wages[Number(t.dataset.i)][t.dataset.wg] = t.value;
     }

@@ -393,3 +393,8 @@ input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--accent); f
 .leg i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
 .leg b { font-weight: 800; font-size: 14.5px; }
 .leg .k-done { background: var(--ring-b); } .leg .k-plan { background: var(--ring-plan); }
+.wt-act { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; color: var(--sub); font-weight: 700; }
+.wt-act svg { width: 15px; height: 15px; color: var(--ring-b); flex: none; }
+.wt-act.on { color: var(--text); }
+.shift .amt.cov { color: var(--sub); text-decoration: line-through; }
+.add-row.del { color: var(--red); border-top: 1px solid var(--line); }
