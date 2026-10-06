@@ -60,8 +60,13 @@
       const o = ov[ev.id] || {};
       const wp = o.wpId ? wpById(o.wpId) : matchWp(ev.t);
       if (!wp) return;
-      const st = new Date(ev.s), date = ymd(st), s = st.getHours() * 60 + st.getMinutes();
-      all.push({ id: ev.id, src: 'gcal', date, s, e: s + Math.round((ev.e - ev.s) / 60000), wpId: wp.id, brk: o.brk == null ? null : o.brk, title: ev.t, cal: ev.cal, hidden: !!o.hidden, memo: '', endMs: ev.e });
+      const st = new Date(ev.s), date = ymd(st);
+      let s = st.getHours() * 60 + st.getMinutes(), e = s + Math.round((ev.e - ev.s) / 60000);
+      const edited = o.s != null && o.e != null;
+      if (edited) { s = o.s; e = o.e; }   // アプリで時間を直したとき（カレンダーはそのまま）
+      all.push({ id: ev.id, src: 'gcal', date, s, e, wpId: wp.id, brk: o.brk == null ? null : o.brk, title: ev.t, cal: ev.cal, hidden: !!o.hidden, memo: '', edited,
+        calS: st.getHours() * 60 + st.getMinutes(), calE: st.getHours() * 60 + st.getMinutes() + Math.round((ev.e - ev.s) / 60000),
+        endMs: edited ? toDate(date).getTime() + e * 60000 : ev.e });
     });
     S.data.shifts.forEach(m => {
       const wp = wpById(m.wpId);
@@ -235,8 +240,10 @@
     let h = '<div class="cal-h"><button class="nav-btn" data-act="mprev" aria-label="前の月">' + ICON.prev + '</button>'
       + '<button class="cal-title" data-act="mtoday"><b>' + y + '年' + (m + 1) + '月</b></button>'
       + '<button class="nav-btn" data-act="mnext" aria-label="次の月">' + ICON.next + '</button><span class="sp"></span>'
+      + (!cfg().clock && wps().length ? '<button class="clock-in" data-act="clockIn"><i></i>出勤</button>' : '')
       + (S.mode === 'api' ? '<button class="icon-btn' + (S.syncing ? ' spin' : '') + '" data-act="sync" aria-label="カレンダーと同期">' + ICON.sync + '</button>' : '')
       + '</div>';
+    if (cfg().clock) h += clockCard();
     if (S.mode === 'demo') h += '<div class="banner">お試しデータを表示中<button class="btn sm gray" data-act="gotoSet">はじめる</button></div>';
     if (!wps().length) h += '<div class="banner">まず「勤務先」で時給とカレンダーのキーワードを登録してください<button class="btn sm gray" data-act="newWp">登録</button></div>';
 
@@ -290,7 +297,7 @@
     return h;
   }
   function shiftRow(x, showDate) {
-    const badge = x.src === 'gcal' ? '<span class="tag g">カレンダー</span>' : '<span class="tag">手入力</span>';
+    const badge = x.src === 'gcal' ? '<span class="tag g">カレンダー</span>' + (x.edited ? '<span class="tag warn">時間を修正</span>' : '') : '<span class="tag">手入力</span>';
     const st = x.hidden ? '<span class="tag warn">除外中</span>' : x.dup ? '<span class="tag warn">カレンダーと重複</span>' : x.covered ? '<span class="tag s-recv">給料実績で計算</span>' : '<span class="tag s-' + x.state + '">' + stateLabel[x.state] + '</span>';
     return '<button class="shift' + (x.off ? ' off' : '') + '" data-act="edit" data-id="' + esc(x.id) + '">'
       + '<i class="bar" style="background:' + x.wp.color + '"></i>'
@@ -298,6 +305,64 @@
       + '<div class="t2">実働 ' + hours(x.p.work) + (x.p.brk ? '・休憩' + x.p.brk + '分' : '') + (x.p.night ? '・深夜' + hShort(x.p.night) : '') + (x.p.ot ? '・残業' + hShort(x.p.ot) : '') + (x.memo ? '・' + esc(x.memo) : '') + '</div>'
       + '<div class="tags">' + badge + st + '</div></div>'
       + '<div class="amt num' + (x.covered && !x.off ? ' cov' : '') + '">' + yen(x.skip ? x.p.amount : x.total) + (x.tr ? '<small>交通費込</small>' : '') + '</div></button>';
+  }
+
+  /* ---------------- 出勤・退勤 ---------------- */
+  // 押した時刻から働いた時間と、今いくら稼いだかをリアルタイムで表示する
+  function clockNow() {
+    const c = cfg().clock, wp = c && wpById(c.wpId);
+    if (!wp) return null;
+    const st = new Date(c.t), date = ymd(st), s = st.getHours() * 60 + st.getMinutes();
+    const sec = Math.max(0, Math.floor((Date.now() - c.t) / 1000));
+    const p = C.pay({ date, s, e: s + Math.floor(sec / 60), brk: 0 }, wp, S.hol);
+    const pay = p.wage * sec / 3600 + (p.night ? p.wage * 0.25 * p.night / 60 : 0);
+    return { wp, date, s, sec, pay };
+  }
+  function clockCard() {
+    const n = clockNow();
+    if (!n) return '';
+    return '<div class="clock-card" style="--c:' + n.wp.color + '"><div class="cl-l"><span class="cl-badge"><i></i>勤務中</span><b>' + esc(n.wp.name) + '</b><small>' + m2hm(n.s) + ' から</small></div>'
+      + '<div class="cl-m"><b class="num" id="clockT">' + fmtSec(n.sec) + '</b><span class="num" id="clockY">' + yen(n.pay) + '</span></div>'
+      + '<button class="clock-out" data-act="clockOut">退勤</button></div>';
+  }
+  const fmtSec = t => Math.floor(t / 3600) + ':' + pad(Math.floor(t / 60) % 60) + ':' + pad(t % 60);
+  setInterval(() => {
+    const t = document.getElementById('clockT');
+    if (!t) return;
+    const n = clockNow();
+    if (!n) return;
+    t.textContent = fmtSec(n.sec);
+    document.getElementById('clockY').textContent = yen(n.pay);
+  }, 1000);
+  function clockIn(wpId) {
+    cfg().clock = { wpId, t: Date.now() };
+    persist(); closeSheet(); render();
+    toast('出勤しました。がんばって！');
+  }
+  function clockChoose() {
+    const today = ymd(new Date());
+    const todays = (derive().byDate[today] || []).filter(x => !x.off).map(x => x.wpId);
+    if (wps().length === 1) { clockIn(wps()[0].id); return; }
+    const list = wps().slice().sort((a, b) => (todays.indexOf(a.id) < 0) - (todays.indexOf(b.id) < 0));
+    openSheet('どこで働きますか？', '', '<div class="card">' + list.map(w => '<button class="wp-pick" data-act="clockStart" data-id="' + w.id + '"><i style="background:' + w.color + '"></i><b>' + esc(w.name) + '</b>' + (todays.indexOf(w.id) >= 0 ? '<span class="tag g">今日のシフト</span>' : '') + '</button>').join('') + '</div>');
+  }
+  // 退勤: 今日の同じ勤務先のシフト（カレンダー優先）があれば、その時間を実際の時間に直す。なければ新しく記録
+  function clockOut() {
+    const n = clockNow();
+    if (!n) { cfg().clock = null; persist(); render(); return; }
+    const e = n.s + Math.max(1, Math.round(n.sec / 60));
+    const cands = (derive().byDate[n.date] || []).filter(x => x.wpId === n.wp.id && !x.hidden && !x.dup)
+      .map(x => ({ x, ov: Math.min(x.e, e) - Math.max(x.s, n.s) })).sort((a, b) => (b.x.src === 'gcal') - (a.x.src === 'gcal') || b.ov - a.ov);
+    const hit = cands.find(c => c.ov > -60);   // 1時間以内のずれなら同じシフトとみなす
+    if (hit) {
+      openShift(hit.x.id);
+      Object.assign(S.form, { start: m2hm(n.s), end: m2hm(e), clock: true });
+    } else {
+      openShift(null, n.date);
+      Object.assign(S.form, { wpId: n.wp.id, start: m2hm(n.s), end: m2hm(e), brk: '', clock: true, addCal: false });
+    }
+    rerenderSheet(shiftForm());
+    $('#sheet h3').textContent = '退勤';
   }
 
   /* ---------------- まとめて入力（スタンプ） ---------------- */
@@ -329,7 +394,7 @@
   function openShift(id, date) {
     const x = id ? derive().all.find(s => s.id === id) : null;
     if (x) {
-      S.form = { id: x.id, src: x.src, date: x.date, start: m2hm(x.s), end: m2hm(x.e), wpId: x.wpId, brk: x.brk == null ? '' : String(x.brk), memo: x.memo || '', hidden: x.hidden, title: x.title, cal: x.cal };
+      S.form = { id: x.id, src: x.src, date: x.date, start: m2hm(x.s), end: m2hm(x.e), wpId: x.wpId, brk: x.brk == null ? '' : String(x.brk), memo: x.memo || '', hidden: x.hidden, title: x.title, cal: x.cal, calS: x.calS, calE: x.calE };
     } else {
       const last = derive().tpl[0];
       const w = wps()[0];
@@ -345,12 +410,13 @@
       const tpl = derive().tpl;
       if (tpl.length || (cfg().hiddenTpl || []).length) h += tplHead() + '<div class="chips tpls">' + tpl.map((t, i) => tplChip(t, wpById(t.wpId), 'useTpl', i, f.wpId === t.wpId && hm2m(f.start) === t.s && (hm2m(f.end) <= hm2m(f.start) ? hm2m(f.end) + 1440 : hm2m(f.end)) === t.e)).join('') + (S.tplEdit && (cfg().hiddenTpl || []).length ? '<button class="tpl" data-act="showTpl"><span>消したものを戻す</span></button>' : '') + '</div>';
     } else {
-      h += '<div class="note">Googleカレンダーの予定「<b>' + esc(f.title) + '</b>」から読み込んでいます（' + esc(f.cal || '') + '）。日時を変えるときはカレンダーのほうを直してください。</div>';
+      h += '<div class="note">' + (f.clock ? '<b>お疲れさまでした！</b> 実際に働いた時間で、カレンダーのシフト（' + m2hm(f.calS) + '〜' + m2hm(f.calE) + '）を記録し直します。' : 'Googleカレンダーの予定「<b>' + esc(f.title) + '</b>」から読み込んでいます（' + esc(f.cal || '') + '）。時間を直すと、給料はアプリで直した時間で計算します（カレンダーはそのまま）。') + '</div>';
     }
+    if (f.clock && !g) h += '<div class="note"><b>お疲れさまでした！</b> 実際に働いた時間で' + (f.id ? 'シフトを記録し直します。' : '新しいシフトとして記録します。') + '</div>';
     h += '<div class="card form">'
       + '<div class="f-row"><span>勤務先</span><div class="seg">' + wps().map(w => '<button class="' + (f.wpId === w.id ? 'on' : '') + '" data-act="fWp" data-id="' + w.id + '" style="--c:' + w.color + '">' + esc(w.name) + '</button>').join('') + '</div></div>'
       + '<div class="f-row"><span>日付</span><input class="in" type="date" data-f="date" value="' + f.date + '"' + (g ? ' disabled' : '') + '></div>'
-      + '<div class="f-row"><span>時間</span><div class="times"><input class="in" type="time" step="300" data-f="start" value="' + f.start + '"' + (g ? ' disabled' : '') + '><em>〜</em><input class="in" type="time" step="300" data-f="end" value="' + f.end + '"' + (g ? ' disabled' : '') + '></div></div>'
+      + '<div class="f-row"><span>時間</span><div class="times"><input class="in" type="time" step="60" data-f="start" value="' + f.start + '"><em>〜</em><input class="in" type="time" step="60" data-f="end" value="' + f.end + '"></div></div>'
       + '<div class="f-row"><span>休憩</span><div class="brk"><input class="in num" type="number" inputmode="numeric" min="0" step="5" placeholder="自動" data-f="brk" value="' + esc(f.brk) + '"><em>分</em></div></div>'
       + (g ? '' : '<div class="f-row"><span>メモ</span><input class="in wide" type="text" data-f="memo" placeholder="任意" value="' + esc(f.memo) + '"></div>')
       + '</div>';
@@ -360,9 +426,10 @@
     } else if (!f.id && S.mode === 'api') {
       h += '<label class="card toggle"><span>Googleカレンダーにも登録する<small>カレンダーを正として、以後はカレンダーから読み込みます</small></span><input type="checkbox" data-f="addCal"' + (f.addCal ? ' checked' : '') + '></label>';
     }
-    h += '<button class="btn primary block" data-act="saveShift">' + (f.id ? '保存' : '追加') + '</button>';
+    h += '<button class="btn primary block" data-act="saveShift">' + (f.clock ? 'この時間で記録' : f.id ? '保存' : '追加') + '</button>';
+    if (f.clock) h += '<button class="btn gray block mt" data-act="clockCancel">記録しないで終わる</button>';
     if (f.id && !g) h += '<button class="btn danger block mt" data-act="delShift">このシフトを削除</button>';
-    if (g && (f.brk !== '' || (cfg().overrides[f.id] || {}).wpId)) h += '<button class="btn gray block mt" data-act="resetOv">カレンダーの内容に戻す</button>';
+    if (g && !f.clock && Object.keys(cfg().overrides[f.id] || {}).length) h += '<button class="btn gray block mt" data-act="resetOv">カレンダーの内容に戻す</button>';
     return h;
   }
   function formShift() {
@@ -389,8 +456,10 @@
       const ev = S.data.events.find(e => e.id === f.id);
       const auto = ev && matchWp(ev.t);
       if (!auto || auto.id !== f.wpId) o.wpId = f.wpId;
+      if (x.s !== f.calS || x.e !== f.calE) { o.s = x.s; o.e = x.e; }
       if (Object.keys(o).length) ov[f.id] = o; else delete ov[f.id];
-      persist(); closeSheet(); render(); return;
+      if (f.clock) cfg().clock = null;
+      persist(); closeSheet(); render(); if (f.clock) toast('記録しました。お疲れさまでした！'); return;
     }
     const row = { id: f.id || uid(), date: f.date, start: f.start, end: f.end, wpId: f.wpId, brk: f.brk === '' ? null : Number(f.brk), memo: f.memo, createdAt: new Date().toISOString() };
     if (!f.id && f.addCal && S.mode === 'api') {
@@ -403,6 +472,7 @@
         S.data.events.push(j.event);
         if (row.brk != null) cfg().overrides[j.event.id] = { brk: row.brk };
         if (!matchWp(j.event.t) || matchWp(j.event.t).id !== f.wpId) cfg().overrides[j.event.id] = Object.assign(cfg().overrides[j.event.id] || {}, { wpId: f.wpId });
+        if (f.clock) cfg().clock = null;
         persist(); closeSheet(); S.sel = f.date; render(); toast('Googleカレンダーに登録しました');
         return;
       } catch (e) {
@@ -411,6 +481,7 @@
     } else if (!f.id && S.mode === 'api') cfg().addToCal = false;
     const i = S.data.shifts.findIndex(m => m.id === row.id);
     if (i >= 0) S.data.shifts[i] = row; else S.data.shifts.push(row);
+    if (f.clock) { cfg().clock = null; toast('記録しました。お疲れさまでした！'); }
     persist(); closeSheet(); S.sel = f.date;
     const d = toDate(f.date); S.month = new Date(d.getFullYear(), d.getMonth(), 1);
     render();
@@ -546,6 +617,7 @@
         + '<div class="f-row"><span>期間</span><div class="times"><input class="in dt" type="date" data-ac="start" data-i="' + i + '" value="' + r.start + '"><em>〜</em><input class="in dt" type="date" data-ac="end" data-i="' + i + '" value="' + r.end + '"></div></div>'
         + '<div class="f-row"><span>給与（今月の給料）</span><div class="brk"><input class="in num" type="number" inputmode="numeric" data-ac="salary" data-i="' + i + '" value="' + esc(r.salary) + '"><em>円</em></div></div>'
         + '<div class="f-row"><span>交通費</span><div class="brk"><input class="in num" type="number" inputmode="numeric" data-ac="transport" data-i="' + i + '" value="' + esc(r.transport) + '"><em>円</em></div></div>'
+        + '<div class="f-row"><span>勤務時間</span><div class="brk"><input class="in num" type="number" inputmode="numeric" min="0" data-ac="hh" data-i="' + i + '" value="' + Math.floor((Number(r.minutes) || 0) / 60) + '"><em>時間</em><input class="in num sm" type="number" inputmode="numeric" min="0" max="59" data-ac="mm" data-i="' + i + '" value="' + ((Number(r.minutes) || 0) % 60) + '"><em>分</em></div></div>'
         + '<div class="f-row"><span>出勤日数（任意）</span><div class="brk"><input class="in num" type="number" inputmode="numeric" data-ac="days" data-i="' + i + '" value="' + esc(r.days) + '"><em>日</em></div></div>'
         + (f.rows.length > 1 ? '<button class="add-row del" data-act="actDelRow" data-i="' + i + '">この期間を消す</button>' : '')
         + '</div>';
@@ -790,6 +862,10 @@
       case 'pyNow': S.year = new Date().getFullYear(); render(); break;
       case 'pmDetail': pmDetail(); break;
       case 'editAct': openAct(b.dataset.wp, b.dataset.pm); break;
+      case 'clockIn': clockChoose(); break;
+      case 'clockStart': clockIn(b.dataset.id); break;
+      case 'clockOut': clockOut(); break;
+      case 'clockCancel': if (confirm('今回の勤務は記録しないで終わりますか？')) { cfg().clock = null; persist(); closeSheet(); render(); } break;
       case 'actAddRow': S.actForm.rows.push(newAct(wpById(S.actForm.wpId), S.actForm.pm)); rerenderSheet(actForm()); break;
       case 'actDelRow': S.actForm.rows.splice(Number(b.dataset.i), 1); rerenderSheet(actForm()); break;
       case 'saveAct': saveAct(false); break;
@@ -846,7 +922,12 @@
       S.wpForm[t.dataset.w] = t.type === 'checkbox' ? t.checked : t.value;
       if (t.dataset.w === 'breakMode') rerenderSheet(wpFormHtml());
     } else if (t.dataset.ac && S.actForm) {
-      S.actForm.rows[Number(t.dataset.i)][t.dataset.ac] = t.value;
+      const r = S.actForm.rows[Number(t.dataset.i)];
+      if (t.dataset.ac === 'hh' || t.dataset.ac === 'mm') {
+        const hh = t.dataset.ac === 'hh' ? Number(t.value) || 0 : Math.floor((Number(r.minutes) || 0) / 60);
+        const mm = t.dataset.ac === 'mm' ? Number(t.value) || 0 : (Number(r.minutes) || 0) % 60;
+        r.minutes = hh * 60 + mm;
+      } else r[t.dataset.ac] = t.value;
     } else if (t.dataset.wg && S.wpForm) {
       S.wpForm.wages[Number(t.dataset.i)][t.dataset.wg] = t.value;
     }

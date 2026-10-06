@@ -398,3 +398,25 @@ input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--accent); f
 .wt-act.on { color: var(--text); }
 .shift .amt.cov { color: var(--sub); text-decoration: line-through; }
 .add-row.del { color: var(--red); border-top: 1px solid var(--line); }
+
+/* ---------- 出勤・退勤 ---------- */
+.clock-in { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 14px 0 12px; margin-right: 8px; border-radius: 18px; background: var(--ring-b); color: #fff; font-weight: 800; font-size: 14px; box-shadow: 0 3px 10px rgba(18,161,80,.3); }
+.clock-in i { width: 0; height: 0; border-left: 9px solid #fff; border-top: 6px solid transparent; border-bottom: 6px solid transparent; }
+.clock-in:active { transform: scale(.96); }
+.clock-card { display: flex; align-items: center; gap: 12px; padding: 12px 12px 12px 16px; margin-bottom: 12px; border-radius: var(--r);
+  background: linear-gradient(135deg, var(--ring-a), var(--ring-b)); color: #fff; box-shadow: 0 6px 20px rgba(18,161,80,.3); }
+.cl-l { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.cl-l b { font-size: 16px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cl-l small { font-size: 12px; opacity: .85; font-weight: 600; }
+.cl-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 800; opacity: .95; }
+.cl-badge i { width: 7px; height: 7px; border-radius: 50%; background: #fff; animation: blink 1.4s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+.cl-m { display: flex; flex-direction: column; align-items: flex-end; }
+.cl-m b { font-size: 24px; font-weight: 800; letter-spacing: -.01em; line-height: 1.1; }
+.cl-m span { font-size: 14px; font-weight: 800; opacity: .95; }
+.clock-out { flex: none; height: 44px; padding: 0 16px; border-radius: 12px; background: #fff; color: var(--ring-b); font-weight: 800; font-size: 15px; }
+.clock-out:active { transform: scale(.96); }
+.wp-pick { display: flex; align-items: center; gap: 10px; width: 100%; padding: 15px 16px; border-bottom: 1px solid var(--line); font-size: 16px; }
+.wp-pick:last-child { border-bottom: 0; }
+.wp-pick i { width: 12px; height: 12px; border-radius: 50%; }
+.wp-pick b { flex: 1; text-align: left; }
